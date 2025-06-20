@@ -1,6 +1,7 @@
 import sys
 from functools import partial
 from datetime import datetime
+import os
 
 import numpy as np
 from numpy import fft
@@ -8,6 +9,30 @@ from vispy import scene
 from vispy.color import get_colormap
 from vispy.scene.visuals import ColorBar
 from vispy.scene.visuals import Text
+
+# Configure VisPy backend for remote connections
+# Check if we're running over SSH (common environment variables)
+is_remote = any([
+    'SSH_CLIENT' in os.environ,
+    'SSH_CONNECTION' in os.environ,
+    'SSH_TTY' in os.environ,
+    os.environ.get('DISPLAY', '').startswith(':'),  # X11 forwarding
+    os.environ.get('ARRAYSHOW_REMOTE', '0') == '1',  # Explicit remote mode
+])
+
+if is_remote:
+    print("Remote connection detected - configuring VisPy for X11 forwarding...")
+    # Try to use software rendering for better SSH compatibility
+    os.environ['VISPY_GL_LIB'] = 'gl'  # Use OpenGL library
+    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'  # Force software rendering
+    # Force software rendering
+    try:
+        from vispy import app
+        app.use_app('pyqt5')  # Use PyQt5 backend
+        print("Configured for remote display")
+    except Exception as e:
+        print(f"Warning: Could not configure remote backend: {e}")
+        print("Falling back to default backend - display may not work properly over SSH")
 
 # Import qmricolors to register custom colormaps
 try:
@@ -109,7 +134,25 @@ class NDArrayViewer(QtWidgets.QMainWindow):
         self.view_button_style_inactive = "background-color: #555; color: #ccc; border: 1px solid #666; border-radius: 3px;"
 
         # --- 3. Create VisPy Canvas ---
-        self.canvas = scene.SceneCanvas(keys="interactive", show=False)
+        try:
+            # Try to create canvas with optimal settings
+            self.canvas = scene.SceneCanvas(keys="interactive", show=False)
+            print("VisPy canvas created successfully")
+        except Exception as e:
+            print(f"Warning: Canvas creation failed with default settings: {e}")
+            if is_remote:
+                print("Attempting fallback configuration for remote connection...")
+                try:
+                    # Force software rendering for SSH
+                    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
+                    self.canvas = scene.SceneCanvas(keys="interactive", show=False, gl_debug=False)
+                    print("Canvas created with software rendering fallback")
+                except Exception as e2:
+                    print(f"Fallback also failed: {e2}")
+                    raise e2
+            else:
+                raise e
+                
         self.view = self.canvas.central_widget.add_view()
         self.canvas.events.key_press.connect(self._on_key_press)
         self.canvas.events.mouse_move.connect(self._on_mouse_move)
