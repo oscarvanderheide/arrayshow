@@ -20,19 +20,52 @@ is_remote = any([
     os.environ.get('ARRAYSHOW_REMOTE', '0') == '1',  # Explicit remote mode
 ])
 
-if is_remote:
-    print("Remote connection detected - configuring VisPy for X11 forwarding...")
-    # Try to use software rendering for better SSH compatibility
-    os.environ['VISPY_GL_LIB'] = 'gl'  # Use OpenGL library
-    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'  # Force software rendering
-    # Force software rendering
+def configure_vispy_for_remote():
+    """Configure VisPy with aggressive fallbacks for remote display."""
+    print("Configuring VisPy for remote display...")
+    
+    # Set environment variables for software rendering
+    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
+    os.environ['GALLIUM_DRIVER'] = 'llvmpipe'  # Use software rasterizer
+    os.environ['MESA_GL_VERSION_OVERRIDE'] = '3.3COMPAT'
+    os.environ['MESA_GLSL_VERSION_OVERRIDE'] = '330'
+    
     try:
-        from vispy import app
-        app.use_app('pyqt5')  # Use PyQt5 backend
-        print("Configured for remote display")
+        from vispy import app, config
+        
+        # Try different backend configurations
+        backends_to_try = [
+            ('pyqt5', {'gl': 'gl'}),
+            ('pyqt5', {}),
+            ('qt', {}),
+        ]
+        
+        for backend, kwargs in backends_to_try:
+            try:
+                print(f"Trying backend: {backend} with {kwargs}")
+                app.use_app(backend, **kwargs)
+                print(f"Successfully configured backend: {backend}")
+                break
+            except Exception as e:
+                print(f"Backend {backend} failed: {e}")
+                continue
+        else:
+            print("All backends failed, using default")
+            
+        # Configure VisPy for minimal OpenGL requirements
+        config.gl_debug = False
+        config.gl_max_texture_size = 2048  # Reduce texture size
+        
+        print("VisPy configured for remote display")
+        return True
+        
     except Exception as e:
-        print(f"Warning: Could not configure remote backend: {e}")
-        print("Falling back to default backend - display may not work properly over SSH")
+        print(f"Failed to configure VisPy: {e}")
+        return False
+
+if is_remote:
+    print("Remote connection detected - applying remote display configuration...")
+    configure_vispy_for_remote()
 
 # Import qmricolors to register custom colormaps
 try:
@@ -73,6 +106,49 @@ class NDArrayViewer(QtWidgets.QMainWindow):
     A high-performance N-dimensional array viewer with fully configurable dimension roles,
     animation playback, and FFT analysis.
     """
+
+    def _create_canvas_with_fallbacks(self):
+        """Create VisPy canvas with multiple fallback strategies for remote connections."""
+        canvas_configs = [
+            # Standard configuration
+            {'keys': 'interactive', 'show': False, 'config': 'default'},
+            
+            # Remote-optimized configurations
+            {'keys': 'interactive', 'show': False, 'gl_debug': False, 'config': 'remote_basic'},
+            
+            # Minimal configuration
+            {'show': False, 'size': (800, 600), 'config': 'minimal'},
+            
+            # Ultra-minimal configuration
+            {'show': False, 'config': 'ultra_minimal'},
+        ]
+        
+        for i, config in enumerate(canvas_configs):
+            config_name = config.pop('config')
+            print(f"Attempting canvas creation with {config_name} configuration...")
+            
+            try:
+                # Set additional environment variables for each attempt
+                if i > 0:  # After first attempt, get more aggressive
+                    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
+                    os.environ['GALLIUM_DRIVER'] = 'llvmpipe'
+                    
+                if i > 1:  # Even more aggressive
+                    os.environ['MESA_GL_VERSION_OVERRIDE'] = '2.1'
+                    os.environ['MESA_GLSL_VERSION_OVERRIDE'] = '120'
+                    
+                canvas = scene.SceneCanvas(**config)
+                print(f"✓ Canvas created successfully with {config_name} configuration")
+                return canvas
+                
+            except Exception as e:
+                print(f"✗ {config_name} configuration failed: {e}")
+                if i == len(canvas_configs) - 1:
+                    print("All canvas configurations failed!")
+                    raise e
+                continue
+        
+        raise RuntimeError("Failed to create VisPy canvas with any configuration")
 
     def __init__(self, data, title="N-D Array Viewer"):
         super().__init__()
@@ -134,25 +210,7 @@ class NDArrayViewer(QtWidgets.QMainWindow):
         self.view_button_style_inactive = "background-color: #555; color: #ccc; border: 1px solid #666; border-radius: 3px;"
 
         # --- 3. Create VisPy Canvas ---
-        try:
-            # Try to create canvas with optimal settings
-            self.canvas = scene.SceneCanvas(keys="interactive", show=False)
-            print("VisPy canvas created successfully")
-        except Exception as e:
-            print(f"Warning: Canvas creation failed with default settings: {e}")
-            if is_remote:
-                print("Attempting fallback configuration for remote connection...")
-                try:
-                    # Force software rendering for SSH
-                    os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
-                    self.canvas = scene.SceneCanvas(keys="interactive", show=False, gl_debug=False)
-                    print("Canvas created with software rendering fallback")
-                except Exception as e2:
-                    print(f"Fallback also failed: {e2}")
-                    raise e2
-            else:
-                raise e
-                
+        self.canvas = self._create_canvas_with_fallbacks()
         self.view = self.canvas.central_widget.add_view()
         self.canvas.events.key_press.connect(self._on_key_press)
         self.canvas.events.mouse_move.connect(self._on_mouse_move)
